@@ -1,0 +1,314 @@
+-- =============================================================================
+-- ROBLOX DOORS FLOOR 100 - 200 COMPLETE SYSTEM SCRIPT
+-- Place this script in ServerScriptService
+-- =============================================================================
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
+local Players = game:GetService("Players")
+
+--------------------------------------------------------------------------------
+-- 1. SETUP FOLDERS & REMOTES
+--------------------------------------------------------------------------------
+local function getOrCreateFolder(parent, name)
+	local folder = parent:FindFirstChild(name)
+	if not folder then
+		folder = Instance.new("Folder")
+		folder.Name = name
+		folder.Parent = parent
+	end
+	return folder
+end
+
+local roomsFolder = getOrCreateFolder(ReplicatedStorage, "Rooms")
+local lootFolder = getOrCreateFolder(ReplicatedStorage, "LootItems")
+local remotesFolder = getOrCreateFolder(ReplicatedStorage, "RemotesFolder")
+local currentRooms = getOrCreateFolder(Workspace, "CurrentRooms")
+
+-- RemoteEvent สำหรับ MotorReplication
+local motorRemote = remotesFolder:FindFirstChild("MotorReplication")
+if not motorRemote then
+	motorRemote = Instance.new("RemoteEvent")
+	motorRemote.Name = "MotorReplication"
+	motorRemote.Parent = remotesFolder
+end
+
+--------------------------------------------------------------------------------
+-- 2. CONFIGURATION (FLOOR 100 - 200)
+--------------------------------------------------------------------------------
+local START_DOOR = 100
+local MAX_DOOR = 200
+local MAX_ACTIVE_ROOMS = 5
+local ENTITY_SPAWN_CHANCE = 0.3 -- โอกาสเกิดผี 30% ต่อการเปิดประตู
+
+local currentDoorNumber = START_DOOR
+local prevRoom = nil
+local isEntityActive = false
+
+--------------------------------------------------------------------------------
+-- 3. MOTOR REPLICATION SERVER HANDLER (รับค่าเอียงตัว)
+--------------------------------------------------------------------------------
+motorRemote.OnServerEvent:Connect(function(player, angleValue)
+	if typeof(angleValue) ~= "number" then return end
+	local character = player.Character
+	if not character then return end
+	
+	local waist = character:FindFirstChild("Waist", true) or character:FindFirstChild("Neck", true)
+	if waist and waist:IsA("Motor6D") then
+		local radAngle = math.rad(angleValue)
+		waist.C0 = CFrame.new(waist.C0.Position) * CFrame.Angles(0, radAngle, 0)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- 4. DRAWER & LOOT SYSTEM
+--------------------------------------------------------------------------------
+local function setupDrawer(drawer)
+	if not drawer:IsA("BasePart") and not drawer:IsA("Model") then return end
+	
+	local prompt = drawer:FindFirstChildOfClass("ProximityPrompt")
+	if not prompt then
+		prompt = Instance.new("ProximityPrompt")
+		prompt.ActionText = "เปิดลิ้นชัก"
+		prompt.ObjectText = "ลิ้นชัก"
+		prompt.HoldDuration = 0.3
+		prompt.MaxActivationDistance = 6
+		prompt.Parent = drawer
+	end
+
+	local isOpen = false
+	local isMoving = false
+	local hasLooted = false
+	local startCFrame = drawer:GetPivot()
+	local openCFrame = startCFrame * CFrame.new(0, 0, 2.5)
+
+	local function animateDrawer(targetCFrame)
+		local cfValue = Instance.new("CFrameValue")
+		cfValue.Value = drawer:GetPivot()
+		
+		local conn = cfValue.Changed:Connect(function(newCF)
+			drawer:PivotTo(newCF)
+		end)
+		
+		local tween = TweenService:Create(cfValue, TweenInfo.new(0.35, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Value = targetCFrame})
+		tween:Play()
+		
+		tween.Completed:Connect(function()
+			conn:Disconnect()
+			cfValue:Destroy()
+		end)
+		return tween
+	end
+
+	prompt.Triggered:Connect(function(player)
+		if isMoving then return end
+		isMoving = true
+
+		if not isOpen then
+			local t = animateDrawer(openCFrame)
+			t.Completed:Wait()
+			isOpen = true
+			prompt.ActionText = "ปิดลิ้นชัก"
+
+			if not hasLooted then
+				hasLooted = true
+				local availableLoot = lootFolder:GetChildren()
+				if #availableLoot > 0 then
+					local item = availableLoot[math.random(1, #availableLoot)]:Clone()
+					item.Parent = player:WaitForChild("Backpack")
+				end
+			end
+		else
+			local t = animateDrawer(startCFrame)
+			t.Completed:Wait()
+			isOpen = false
+			prompt.ActionText = "เปิดลิ้นชัก"
+		end
+
+		isMoving = false
+	end)
+end
+
+--------------------------------------------------------------------------------
+-- 5. ENTITY SPAWNER SYSTEM (RUSH / AMBUSH STYLE)
+--------------------------------------------------------------------------------
+local function spawnEntity()
+	if isEntityActive then return end
+	isEntityActive = true
+
+	-- เตือนด้วยไฟกะพริบทุกห้อง
+	task.spawn(function()
+		for _, room in ipairs(currentRooms:GetChildren()) do
+			for _, light in ipairs(room:GetDescendants()) do
+				if light:IsA("Light") then
+					task.spawn(function()
+						for i = 1, 6 do
+							light.Enabled = not light.Enabled
+							task.wait(math.random(5, 15) / 100)
+						end
+						light.Enabled = true
+					end)
+				end
+			end
+		end
+	end)
+
+	task.wait(2) -- หน่วงเวลาเตือนก่อนผีพุ่งมา
+
+	-- สร้างตัวผี
+	local entity = Instance.new("Part")
+	entity.Name = "MonsterEntity"
+	entity.Size = Vector3.new(4, 6, 4)
+	entity.Color = Color3.fromRGB(255, 0, 0)
+	entity.Material = Enum.Material.Neon
+	entity.CanCollide = false
+	entity.Anchored = true
+
+	-- ชนผู้เล่นแล้วตายทันที
+	entity.Touched:Connect(function(hit)
+		local char = hit.Parent
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.Health = 0
+		end
+	end)
+
+	local roomList = currentRooms:GetChildren()
+	table.sort(roomList, function(a, b)
+		local numA = tonumber(a.Name:match("%d+")) or 0
+		local numB = tonumber(b.Name:match("%d+")) or 0
+		return numA < numB
+	end)
+
+	if #roomList > 0 then
+		local startEntrance = roomList[1]:FindFirstChild("Entrance")
+		if startEntrance then
+			entity.CFrame = startEntrance.CFrame
+			entity.Parent = Workspace
+
+			-- ให้ผีวิ่งผ่านทุกห้องตั้งแต่ห้องแรกถึงห้องปัจจุบัน
+			for _, room in ipairs(roomList) do
+				local exitPart = room:FindFirstChild("Exit")
+				if exitPart then
+					local dist = (entity.Position - exitPart.Position).Magnitude
+					local tweenInfo = TweenInfo.new(dist / 40, Enum.EasingStyle.Linear)
+					local tween = TweenService:Create(entity, tweenInfo, {CFrame = exitPart.CFrame})
+					tween:Play()
+					tween.Completed:Wait()
+				end
+			end
+		end
+	end
+
+	entity:Destroy()
+	isEntityActive = false
+end
+
+--------------------------------------------------------------------------------
+-- 6. PROCEDURAL ROOM GENERATOR (DOORS 100 - 200)
+--------------------------------------------------------------------------------
+local function generateRoom()
+	if currentDoorNumber > MAX_DOOR then
+		print("🎉 ยินดีด้วย! คุณผ่านแมพ DOORS ถึงประตู 200 เรียบร้อยแล้ว!")
+		return
+	end
+
+	local templates = roomsFolder:GetChildren()
+	if #templates == 0 then
+		warn("⚠️ กรุณาเพิ่มโมเดลห้องใน ReplicatedStorage.Rooms ก่อน!")
+		return
+	end
+
+	-- สุ่มห้อง
+	local template = templates[math.random(1, #templates)]
+	local newRoom = template:Clone()
+	newRoom.Name = "Room_" .. currentDoorNumber
+
+	-- วางตำแหน่งห้องต่อจากห้องเก่า
+	if prevRoom then
+		local prevExit = prevRoom:FindFirstChild("Exit")
+		local newEntrance = newRoom:FindFirstChild("Entrance")
+		if prevExit and newEntrance then
+			local offset = newEntrance.CFrame:ToObjectSpace(newRoom:GetPivot())
+			newRoom:PivotTo(prevExit.CFrame * offset)
+		end
+	else
+		newRoom:PivotTo(CFrame.new(0, 0, 0))
+	end
+
+	newRoom.Parent = currentRooms
+	prevRoom = newRoom
+
+	-- เปิดระบบลิ้นชักทุกชิ้นในห้องนี้อัตโนมัติ
+	for _, obj in ipairs(newRoom:GetDescendants()) do
+		if obj.Name == "Drawer" or obj:FindFirstChild("DrawerPrompt") then
+			setupDrawer(obj)
+		end
+	end
+
+	-- ตั้งค่าประตูประจำห้อง
+	local door = newRoom:FindFirstChild("Door", true)
+	if door then
+		local prompt = door:FindFirstChildOfClass("ProximityPrompt") or Instance.new("ProximityPrompt")
+		prompt.ActionText = "เปิดประตู " .. currentDoorNumber
+		prompt.ObjectText = "ประตู"
+		prompt.HoldDuration = 0.3
+		prompt.Parent = door
+
+		-- เปลี่ยนเลขประตูบน SurfaceGui
+		local gui = door:FindFirstChildOfClass("SurfaceGui")
+		if gui then
+			local textLabel = gui:FindFirstChildOfClass("TextLabel")
+			if textLabel then
+				textLabel.Text = tostring(currentDoorNumber)
+			end
+		end
+
+		local doorOpened = false
+		prompt.Triggered:Connect(function(player)
+			if doorOpened then return end
+			doorOpened = true
+			prompt.Enabled = false
+
+			-- แอนิเมชันเปิดประตู
+			local hinge = door.Parent:FindFirstChild("Hinge") or door
+			local openTween = TweenService:Create(hinge, TweenInfo.new(0.8, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {
+				CFrame = hinge.CFrame * CFrame.Angles(0, math.rad(-90), 0)
+			})
+			openTween:Play()
+
+			-- สร้างห้องถัดไป
+			currentDoorNumber += 1
+			generateRoom()
+
+			-- สุ่มโอกาสเสกผี
+			if math.random() <= ENTITY_SPAWN_CHANCE and currentDoorNumber > START_DOOR + 2 then
+				task.delay(math.random(3, 8), function()
+					spawnEntity()
+				end)
+			end
+		end)
+	end
+
+	-- ลบห้องเก่าที่ผ่านไปแล้วเพื่อลด Lag
+	local activeRooms = currentRooms:GetChildren()
+	if #activeRooms > MAX_ACTIVE_ROOMS then
+		table.sort(activeRooms, function(a, b)
+			local numA = tonumber(a.Name:match("%d+")) or 0
+			local numB = tonumber(b.Name:match("%d+")) or 0
+			return numA < numB
+		end)
+		activeRooms[1]:Destroy()
+	end
+end
+
+--------------------------------------------------------------------------------
+-- 7. INITIALIZATION
+--------------------------------------------------------------------------------
+-- สร้าง 3 ห้องแรกเตรียมไว้ตอนเริ่มเกม
+for i = 1, 3 do
+	generateRoom()
+end
+
+print("✅ ระบบ DOORS Floor 100-200 โหลดเสร็จสิ้น!")
